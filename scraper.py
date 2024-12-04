@@ -1,5 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
+import pymongo
 
 
 def scrape_quotes(url):
@@ -16,7 +17,7 @@ def scrape_quotes(url):
         author = quote.find("small", class_="author").text
 
         # Extract tags
-        tags = [tag.text for tag in quote.find_all("a", class_="tag")]  # List comprehension for conciseness
+        tags = [tag.text for tag in quote.find_all("a", class_="tag")]
 
         all_quotes.append({
             "text": text,
@@ -27,14 +28,25 @@ def scrape_quotes(url):
     return all_quotes
 
 
+# MongoDB connection and setup
+client = pymongo.MongoClient("127.0.0.1", 27017)  # Connect to MongoDB
+db_name = "quotes_db"  # Replace with your desired database name
+collection_name = "quotes"  # Replace with your desired collection name
+
+db = client[db_name]  # Get the database
+collection = db[collection_name]  # Get the collection
+
 # Start with the first page
 base_url = "http://quotes.toscrape.com/"
 url = base_url
-all_quotes = []
 
 while True:
     # Scrape the current page
-    all_quotes.extend(scrape_quotes(url))  # Extend the list with new quotes
+    quotes = scrape_quotes(url)
+
+    # Insert quotes into MongoDB
+    if quotes:
+        collection.insert_many(quotes)
 
     # Find the "Next" page link
     soup = BeautifulSoup(requests.get(url).content, "html.parser")
@@ -45,8 +57,7 @@ while True:
     else:
         break  # No more pages
 
-# Print the extracted quotes and tags
-for quote in all_quotes:
-    print(f'"{quote["text"]}" - {quote["author"]}')
-    print("Tags:", ", ".join(quote["tags"]))
-    print("---")
+print("Quotes scraped and stored in MongoDB.")
+
+# Close the MongoDB connection
+client.close()
