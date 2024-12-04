@@ -1,7 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import pymongo
-from pymongo.errors import ConnectionFailure
+from pymongo.errors import ConnectionFailure, PyMongoError, DuplicateKeyError
 from urllib.parse import urljoin
 from typing import Tuple, List, Dict, Any, Optional
 import logging
@@ -12,7 +12,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.StreamHandler(),  # Logs to console
+        logging.StreamHandler(),               # Logs to console
         logging.FileHandler("scraper.log", mode="a")  # Logs to file
     ]
 )
@@ -39,11 +39,9 @@ def scrape_quotes(page_url: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         all_quotes = []
         for quote in page_quotes:
             try:
-                text = quote.find("span", class_="text").text
-                author = quote.find("small", class_="author").text
-
-                # Using list comprehension for tags
-                tags = [tag.text for tag in quote.find_all("a", class_="tag")]
+                text = quote.find("span", class_="text").get_text(strip=True)
+                author = quote.find("small", class_="author").get_text(strip=True)
+                tags = [tag.get_text(strip=True) for tag in quote.find_all("a", class_="tag")]
 
                 all_quotes.append({
                     "text": text,
@@ -51,10 +49,10 @@ def scrape_quotes(page_url: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
                     "tags": tags
                 })
             except AttributeError as attrib_error:
-                logging.warning(f"Error extracting quote data: {attrib_error}")
+                logging.error(f"Error extracting quote data: {attrib_error}")
                 continue
 
-        # Find the "Next" page link using the existing soup
+        # Find the "Next" page link
         next_page = page_soup.find("li", class_="next")
         if next_page:
             next_page_link = next_page.find("a")["href"]
@@ -72,45 +70,64 @@ def scrape_quotes(page_url: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         return [], None
 
 def main():
-    # MongoDB connection and setup
+    client = None  # Initialize client to None for safe closure in finally
     try:
+        # MongoDB connection and setup
         client = pymongo.MongoClient("127.0.0.1", 27017, serverSelectionTimeoutMS=5000)
-        client.server_info()
+        client.server_info()  # Trigger exception if cannot connect
         db_name = "quotes_db"
         collection_name = "quotes"
         db = client[db_name]
         collection = db[collection_name]
         logging.info("Successfully connected to MongoDB.")
+
+        # Create unique index to prevent duplicates
+        collection.create_index(
+            [('text', pymongo.ASCENDING), ('author', pymongo.ASCENDING)],
+            unique=True
+        )
+
+        # Start with the first page
+        base_url = "https://quotes.toscrape.com/"
+        url = base_url
+
+        while url:
+            # Scrape the current page
+            quotes, next_page_url = scrape_quotes(url)
+
+            if quotes:
+                for quote in quotes:
+                    try:
+                        collection.update_one(
+                            {'text': quote['text'], 'author': quote['author']},
+                            {'$setOnInsert': quote},
+                            upsert=True
+                        )
+                    except DuplicateKeyError:
+                        logging.info("Duplicate quote found and skipped.")
+                    except PyMongoError as mongo_error:
+                        logging.error(f"Error inserting quote into MongoDB: {mongo_error}")
+                logging.info(f"Processed {len(quotes)} quotes from {url}.")
+            else:
+                logging.info(f"No quotes found on the page: {url}.")
+                break  # Exit the loop if no quotes are found
+
+            # Delay to avoid overburdening the server
+            time.sleep(5)  # Adjust the delay as needed
+
+            url = next_page_url
+
+        logging.info("Quotes scraped and stored in MongoDB.")
+
     except ConnectionFailure as conn_error:
         logging.critical(f"Error connecting to MongoDB: {conn_error}")
-        exit(1)
-
-    # Start with the first page
-    base_url = "https://quotes.toscrape.com/"
-    url = base_url
-
-    while url:
-        # Scrape the current page
-        quotes, next_page_url = scrape_quotes(url)
-
-        # Insert quotes into MongoDB
-        if quotes:
-            try:
-                collection.insert_many(quotes)
-                logging.info(f"Inserted {len(quotes)} quotes into MongoDB.")
-            except pymongo.errors.PyMongoError as mongo_error:
-                logging.error(f"Error inserting quotes into MongoDB: {mongo_error}")
-
-        # Delay to avoid overburdening the server
-        time.sleep(2)  # Adjust the delay as needed
-
-        url = next_page_url
-
-    logging.info("Quotes scraped and stored in MongoDB (with enhanced error handling and delay).")
-
-    # Close the MongoDB connection
-    client.close()
-    logging.info("MongoDB connection closed.")
+    except Exception as e:
+        logging.exception(f"An unexpected error occurred: {e}")
+    finally:
+        # Close the MongoDB connection safely
+        if client:
+            client.close()
+            logging.info("MongoDB connection closed.")
 
 if __name__ == "__main__":
     main()

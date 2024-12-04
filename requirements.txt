@@ -45,3 +45,6 @@ traits==6.3.2
 tzdata==2024.1
 urllib3==2.2.2
 Werkzeug==3.0.3
+
+Scrapy~=2.12.0
+itemadapter~=0.10.0
